@@ -1,0 +1,1 @@
+##An autoencoder trained by evaluating the latent representations of the original and generated images
