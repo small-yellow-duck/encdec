@@ -1,186 +1,240 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.autograd as autograd
-import torch.optim as optim
-import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import torch
+import torch.optim as optim
+import numpy as np
+
+
 import os
 from torch.autograd import Variable
-from tensorflow.examples.tutorials.mnist import input_data
 import torchvision.datasets as dsets
 from torchvision import transforms
 
 
 import contrastive
-import net
+import net as net
 
-from scipy import ndimage
 
+
+use_cuda = True
+print(f'use_cuda {use_cuda}')
 
 mb_size = 128
-#mnist = input_data.read_data_sets('../../MNIST_data', one_hot=True)
+lr = 1.0e-4
+cnt = 0
+z_dim = 32 #24
+
+plt.close('all')
+#fig = plt.gcf()
+fig = plt.figure(figsize=(4, 4))
+fig.show()
+fig.canvas.draw()
+
+
+def makeplot(fig, samples):
+    #fig = plt.figure(figsize=(4, 4))
+    gs = gridspec.GridSpec(4, 4)
+    gs.update(wspace=0.05, hspace=0.05)
+
+    for i, sample in enumerate(samples):
+        ax = plt.subplot(gs[i])
+        plt.axis('off')
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.set_aspect('equal')
+        plt.imshow(sample.reshape(28, 28), cmap='Greys_r')
+
+    fig.canvas.draw()
 
 
 train = dsets.MNIST(
-	root='../data/',
-	train=True,
-	transform = transforms.Compose([transforms.ToTensor()]),
-	# transform=transforms.Compose([
-	#	  transforms.ToTensor(),
-	#	  transforms.Normalize((0.1307,), (0.3081,))
-	# ]),
-	download=True
+    root='../data/',
+    train=True,
+    transform = transforms.Compose([transforms.RandomRotation(10), transforms.ToTensor()]),
+    download=True
 )
 test = dsets.MNIST(
-	root='../data/',
-	train=False,
-	transform = transforms.Compose([transforms.ToTensor()])
+    root='../data/',
+    train=False,
+    transform = transforms.Compose([transforms.ToTensor()])
 )
 
 train_iter = torch.utils.data.DataLoader(train, batch_size=mb_size, shuffle=True)	
 val_iter = torch.utils.data.DataLoader(test, batch_size=mb_size, shuffle=True)
 test_iter = torch.utils.data.DataLoader(test, batch_size=mb_size, shuffle=True)
 
-use_cuda = True
 kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 train_loader = torch.utils.data.DataLoader(
-	train,
-	batch_size=mb_size, shuffle=True, **kwargs)
+    train,
+    batch_size=mb_size, shuffle=True, **kwargs)
 val_loader = torch.utils.data.DataLoader(
-	test,
-	batch_size=mb_size, shuffle=True, **kwargs)
+    test,
+    batch_size=mb_size, shuffle=True, **kwargs)
 test_loader = torch.utils.data.DataLoader(
-	test,
-	batch_size=mb_size, shuffle=False, **kwargs)
+    test,
+    batch_size=mb_size, shuffle=False, **kwargs)
 
 
-lr = 1e-3
-cnt = 0
-z_dim = 32
 
-contrastivec = contrastive.ContrastiveLoss()
+contrastiveloss = contrastive.ContrastiveLoss()
+#KLloss = contrastive.KL()
 
-enc = net.Encoder()
-dec = net.Decoder()
+#enc = net.VariationalEncoder(dim=z_dim)
+enc = net.Encoder(dim=z_dim)
+#dec = net.Decoder(output_dim=(28, 28))
+dec = net.Decoder(dim=z_dim)
 
-enc.cuda()
-dec.cuda()
+if use_cuda:
+    enc.cuda()
+    dec.cuda()
 
 
 def reset_grad():
-	enc.zero_grad()
-	dec.zero_grad()
+    enc.zero_grad()
+    dec.zero_grad()
 
-def augment(X):
-	#print(X.numpy().shape)
-	for i in range(X.size(0)):
-		r = ndimage.rotate(X[i, 0].numpy(), np.random.randint(-5, 6), reshape=False)
-		#print(r.shape)
-		shiftx = np.random.randint(-2,2)
-		shifty = np.random.randint(-2,2)
-		if shiftx > 0:
-			r[shiftx:] = r[0:-shiftx]
-		if shiftx < 0:
-			r[0:r.shape[0]+shiftx] = r[-shiftx:]	
-		if shifty > 0:
-			r[:, shifty:] = r[:, 0:-shifty]
-		if shifty < 0:
-			r[:, 0:r.shape[0]+shifty] = r[:, -shifty:]
-			
-		X[i, 0] = torch.from_numpy(r)
-	
-	return X	
-	
+def plot(samples):
+    fig = plt.figure(figsize=(4, 4))
+    gs = gridspec.GridSpec(4, 4)
+    gs.update(wspace=0.05, hspace=0.05)
+
+    for i, sample in enumerate(samples):
+        ax = plt.subplot(gs[i])
+        plt.axis('off')
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.set_aspect('equal')
+        plt.imshow(sample.reshape(28, 28), cmap='Greys_r')
+
+    return fig
+
 
 enc_solver = optim.RMSprop([p for p in enc.parameters()]+[p for p in dec.parameters()], lr=lr)
 
-epoch_len = 64
+epoch_len = 64 #4 #
 max_veclen = 0.0
-patience = 12*epoch_len
+min_veclen = np.inf
+patience = 16 #*epoch_len
 patience_duration = 0
+vec_len = 0.0
+loss = 0.0
 
+transform = transforms.Compose([transforms.ToPILImage(), transforms.RandomAffine(degrees=7, translate=(2.0/28, 2.0/28)),  transforms.ToTensor()])
+#transform = transforms.Compose([transforms.ToPILImage(), transforms.RandomAffine(degrees=7, translate=(2.0/28, 2.0/28))])
+
+mask = torch.ones((mb_size, 1, 28, 28))
+mask[::3, :, 0:14, :] = 0.0*mask[::3, :, 0:14, :]
+mask[1::3, :, :, 0:14] = 0.0*mask[1::3, :, :, 0:14]
+mask = Variable(mask)
+if use_cuda:
+    mask = mask.cuda()
 
 
 for it in range(1000000):
+    if patience_duration > patience:
+        break
+    if it % epoch_len == 0:
+        vec_len = 0.0
 
-	if it % epoch_len == 0:
-		vec_len = 0.0
+    batch_idx, (X, labels) = next(enumerate(train_loader))
 
-	batch_idx, (X, labels) = next(enumerate(train_loader))
-	X_aug = augment(X)
-	X = Variable(X).cuda()
-	X_aug = Variable(X_aug).cuda()
-	labels = torch.zeros((mb_size, 1))
-	labels = Variable(labels).cuda()
-
-	# Dicriminator forward-loss-backward-update
-	mu = enc(X)
-	X2 = dec(mu)
-	X2d = X2.detach()
-	mu2 = enc(X2)
-	mu2d = enc(X2d)
-
-	mu_aug = enc(X_aug)
-	
-	enc_loss = contrastivec(mu[::2], mu[1::2], 0.0*labels[::2])
-	enc_loss += contrastivec(mu_aug, mu2, 1.0-0.0*labels)
-	enc_loss += 2.0*contrastivec(mu, mu2d, 0.0*labels)
-	
-	vec_len += torch.mean(torch.sqrt(torch.mean((mu2-(torch.mean(mu2, 0)).repeat(mb_size, 1))**2, 1)))
-	
-	
-	if vec_len.data.cpu().numpy()[0]/epoch_len > max_veclen:
-		max_veclen = 1.0*vec_len.data.cpu().numpy()[0]/epoch_len
-		patience_duration = 0
-	else:
-		patience_duration += 1	
-	if patience_duration > patience:
-		break
-	
-	enc_loss.backward()
-	enc_solver.step()
+    #degrees = np.random.randint(-180, 180)
+    #transform_fwd = transforms.Compose([transforms.ToPILImage(), transforms.RandomRotation((degrees, degrees+1)),  transforms.ToTensor()])
+    #transform_bwd = transforms.Compose([transforms.ToPILImage(), transforms.RandomRotation((-degrees, -degrees+1)),  transforms.ToTensor()])
 
 
-	# Housekeeping - reset gradient
-	reset_grad()
+    #X_aug = augment(X)
 
-	# Print and plot every now and then
-	if it % (epoch_len) == 0:
-		plt.close('all')
-		#print('Iter-{}; enc_loss: {}; dec_loss: {}'
-		#	  .format(it, enc_loss.data.cpu().numpy(), dec_loss.data.cpu().numpy()))
+    X = Variable(X)
+    #X_aug = Variable(X_aug)
 
-		print('Iter-{}; enc_loss: {}; vec_len: {}, {}'
-			  .format(it, enc_loss.data.cpu().numpy(), vec_len.data.cpu().numpy(), max_veclen))
+    if use_cuda:
+        X = X.cuda()
+        #X_aug = X_aug.cuda()
+    labels = torch.zeros((mb_size, 1))
+    labels = Variable(labels)
 
-		#print('Iter-{}; enc_loss: {};'
-		#	  .format(it, enc_loss.data.cpu().numpy())
-			  			  
-		samples = X2.data[0:8]
-		samples = samples.cpu().numpy()
-		originals = X.data[0:8]
-		originals = originals.cpu().numpy()
-	
-		samples = np.append(samples, originals, axis=0)
+    if use_cuda:
+        labels = labels.cuda()
 
-		fig = plt.figure(figsize=(4, 4))
-		gs = gridspec.GridSpec(4, 4)
-		gs.update(wspace=0.05, hspace=0.05)
+    # Dicriminator forward-loss-backward-update
+    mu = enc(X)
+    #mu_aug = enc(X_aug)
+    #mu, logsigma = enc(X)
+    #mu_aug = enc(mask*(X.flip(2 + it % 2)))
+    X2 = dec(mu)
+    #X2_aug = dec(mu_aug)
+    #X2_aug = (mask*(dec(mu_aug)).flip(2 + it % 2))
+    #mu2_aug = enc(X2_aug)
+    X2d = X2.detach()
+    #mu2, logsigma2 = enc(X2)
+    mu2 = enc(X2)
+    #mu2_aug = enc(X2_aug)
+    mu2d = enc(X2d)
 
-		for i, sample in enumerate(samples):
-			ax = plt.subplot(gs[i])
-			plt.axis('off')
-			ax.set_xticklabels([])
-			ax.set_yticklabels([])
-			ax.set_aspect('equal')
-			plt.imshow(sample.reshape(28, 28), cmap='Greys_r')
-		plt.pause(0.02)
+    enc_loss = contrastiveloss(mu[::2], mu[1::2], 0.0 * labels[::2])
+    enc_loss += contrastiveloss(mu, mu2, 1.0 - 0.0 * labels)
+    enc_loss += 2.0 * contrastiveloss(mu, mu2d, 0.0 * labels)
 
-		if not os.path.exists('out/'):
-			os.makedirs('out/')
 
-		#plt.savefig('out/{}.png'.format(str(cnt).zfill(3)), bbox_inches='tight')
-		cnt += 1
-		
+    #vec_len += torch.mean(torch.sqrt(torch.mean((mu2 - (torch.mean(mu2, 0)).repeat(mb_size, 1)) ** 2, 1))).data.cpu().numpy()
+
+    vec_len += 0.5 * (torch.mean(torch.pow(mu, 2)) + torch.mean(torch.pow(mu2, 2))).data.cpu().numpy()
+
+
+
+
+    enc_loss.backward()
+    enc_solver.step()
+
+    loss += enc_loss.data.cpu().numpy()
+
+
+    # Housekeeping - reset gradient
+    reset_grad()
+
+
+
+    # Print and plot every now and then
+    if it % (epoch_len) == 0:
+        #plt.close('all')
+        #print('Iter-{}; enc_loss: {}; dec_loss: {}'
+        #	  .format(it, enc_loss.data.cpu().numpy(), dec_loss.data.cpu().numpy()))
+
+        vec_len = vec_len/epoch_len
+        loss = loss / epoch_len
+        print('Iter-{}; enc_loss: {}; vec_len: {}, {}'
+              .format(it, loss, vec_len, max_veclen))
+        vec_len = 0.0
+        loss = 0.0
+
+
+        samples = X2.data[0:8]
+        samples = samples.cpu().numpy()
+        originals = X.data[0:8]
+        originals = originals.cpu().numpy()
+
+        #print(samples.shape)
+        #print(originals.shape)
+        samples = np.append(samples, originals, axis=0)
+
+        makeplot(fig, samples)
+        plt.pause(0.001)
+
+
+
+
+        if not os.path.exists('out/'):
+            os.makedirs('out/')
+
+        #plt.savefig('out/{}.png'.format(str(cnt).zfill(3)), bbox_inches='tight')
+        cnt += 1
+
+enc = torch.load('enc_model.pt')
+dec = torch.load('dec_model.pt')
+
+mu = enc(X[0:12])
+X2 = dec(mu)
+
+samples = np.append(X2.data.cpu().numpy(), X[0:12].data.cpu().numpy(), axis=0)
+

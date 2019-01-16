@@ -132,39 +132,47 @@ class VariationalEncoder(nn.Module):
         self.dropout = 0.03125
         convblock = nn.Sequential(
                 nn.Dropout(p=self.dropout),
-                nn.utils.weight_norm(nn.Conv2d(1, 1*self.dim, 3, dilation=1,  stride=2, padding=1)),
+                nn.utils.weight_norm(nn.Conv2d(1, 1 * self.dim, 5, dilation=1, stride=1, padding=2)),
+                #nn.Conv2d(1, 1 * self.dim, 3, dilation=1, stride=1, padding=1),
                 nn.Dropout(p=self.dropout),
                 nn.ReLU(True),
-                nn.utils.weight_norm(nn.Conv2d(1*self.dim, 2*self.dim, 3, dilation=1,  stride=2, padding=1)),
+                nn.MaxPool2d(2),
+                nn.utils.weight_norm(nn.Conv2d(1*self.dim, 2*self.dim, 5, dilation=1, stride=1, padding=2)),
+                #nn.Conv2d(1 * self.dim, 2 * self.dim, 3, dilation=1, stride=1, padding=1),
                 nn.Dropout(p=self.dropout),
                 nn.ReLU(True),
-                nn.utils.weight_norm(nn.Conv2d(2*self.dim, 4*self.dim, 3, dilation=1,  stride=2, padding=1)),
+                nn.MaxPool2d(2),
+                nn.utils.weight_norm(nn.Conv2d(2*self.dim, 4*self.dim, 5, dilation=1,  stride=1, padding=2)),
+                #nn.Conv2d(2 * self.dim, 4 * self.dim, 3, dilation=1, stride=2, padding=1),
                 nn.Dropout(p=self.dropout),
                 nn.ReLU(True),
+                nn.MaxPool2d(2)
                 )
+
         self.main = convblock
 
         #self.get_mu = nn.Linear(4*4*4*self.dim, self.dim)
-        self.get_mu = nn.utils.weight_norm(nn.Linear(4 * 4 * 4 * self.dim, self.dim))
-        self.get_logvar = nn.utils.weight_norm(nn.Linear(4 * 4 * 4 * self.dim, self.dim))
+        self.get_mu = nn.utils.weight_norm(nn.Linear(4 * 3 * 3 * self.dim, self.dim))
+        self.get_logvar = nn.utils.weight_norm(nn.Linear(4 * 3 * 3 * self.dim, self.dim))
         #self.get_logvar = nn.Linear(4*4*4*self.dim, self.dim)
 
 
-    def reparameterize(self, mu, logvar):
-        if self.training:
-            std = logvar.mul(0.5).exp_()
+    def reparameterize(self, mu, logvar, do_reparameterize=False):
+        if self.training and do_reparameterize:
+            #std = logvar.mul(0.5).exp_()
+            std = torch.exp(0.5*logvar)
             #std = 0.5*torch.ones_like(mu)
             eps = Variable(std.data.new(std.size()).normal_())
-            return eps.mul(std).add_(mu)
+            return mu + eps*std
         else:
             return mu
 
 
-    def forward(self, input):
+    def forward(self, input, do_reparameterize=True):
         input = input.view(-1, 1, 28, 28)
         out = self.main(input)
-        out = out.view(-1, 4*4*4*self.dim)
+        out = out.view(out.size(0), -1)
         mu = self.get_mu(out)
         logvar = self.get_logvar(out)
-        z = self.reparameterize(mu, logvar)
+        z = self.reparameterize(mu, logvar, do_reparameterize=do_reparameterize)
         return z.view(z.size(0), -1), logvar
