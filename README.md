@@ -29,4 +29,6 @@ Adding a variational component to the encoder network made the subjective qualit
 
 One advantage of the encoder-decoder network is that it need not work only with continuous data. Because the `E(X') - E(X)` term explicitly detaches a generated item from the graph, continuous-valued predictions for discrete points can also be "repaired" to the closest discrete point.  
 
+The encoder-decoder-encoder is described more thoroughly in the <a href="https://github.com/small-yellow-duck/titanic-ede/blob/master/unsupervised%20deep%20learning%20with%20enc-dec-enc%20-%202019-07-22.pptx">slides</a> in <a href="https://github.com/small-yellow-duck/titanic-ede">this</a> repo.
+
  
